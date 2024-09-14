@@ -1,0 +1,173 @@
+#include <Wire.h>
+#include "MS5837.h"
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ArduinoJson.h>
+#include <vector>
+
+MS5837 sensor;
+int i = 0;
+float temp1 = 7;
+float pres1 = 7;
+int smoothcount = 25;
+float tempSum = 0;
+float presSum = 0;
+
+const int LED_PIN = 2;
+
+// Wi-Fi credentials
+const char* ssid = "Bob";
+const char* password = "qwertyuiop";
+
+WebServer server(80);
+
+// Data storage
+struct SensorData {
+  unsigned long timestamp;
+  float temperature;
+  float pressure;
+};
+
+std::vector<SensorData> dataLog;
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Starting");
+  pinMode(26, OUTPUT);
+  digitalWrite(26, HIGH);
+  
+  pinMode(LED_PIN, OUTPUT);
+
+  setup_wifi();
+  setup_webserver();
+}
+
+void loop() {
+  server.handleClient();
+
+  digitalWrite(LED_PIN, HIGH);
+  
+  for (int i = 0; i <= smoothcount; i++) {
+    sensRead(16);
+    tempSum = tempSum + sensor.temperature();
+    presSum = presSum + sensor.pressure();
+    delay(53);
+  }
+  
+  pres1 = presSum / (smoothcount + 1);
+  temp1 = tempSum / (smoothcount + 1);
+  
+  // Log the data
+  dataLog.push_back({millis(), temp1, pres1});
+  
+  Serial.print("average temp   ");
+  Serial.println(temp1);
+  Serial.print("average pres   ");
+  Serial.println(pres1);
+  
+  presSum = 0;
+  tempSum = 0;
+  
+  digitalWrite(LED_PIN, LOW);
+  delay(3000);
+}
+
+void sensRead(int num) {
+  Wire.begin(num, 22);
+  sensInit();
+  sensor.read();
+}
+
+void sensInit() {
+  if (!sensor.init()) {
+    Serial.println("Init failed! Are power, SDA/SCL connected correctly?");
+  }
+  sensor.setModel(MS5837::MS5837_30BA);
+  sensor.setFluidDensity(997);
+}
+
+void setup_wifi() {
+  delay(10);
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void setup_webserver() {
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/data", HTTP_GET, handleData);
+  server.on("/download", HTTP_GET, handleDownload);
+  
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+void handleRoot() {
+  String html = "<html><head>";
+  html += "<title>ESP32 Sensor Data</title>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<link rel='stylesheet' href='https://cdnjs.cloudflare.com/ajax/libs/mini.css/3.0.1/mini-default.min.css'>";
+  html += "<script src='https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.7.0/chart.min.js'></script>";
+  html += "</head><body>";
+  html += "<h1>ESP32 Sensor Data</h1>";
+  html += "<div><canvas id='sensorChart'></canvas></div>";
+  html += "<div id='currentData'></div>";
+  html += "<button onclick='location.href=\"/download\"'>Download CSV</button>";
+  html += "<script>";
+  html += "let chart; let labels = []; let tempData = []; let pressData = [];";
+  html += "function updateData() {";
+  html += "  fetch('/data').then(response => response.json()).then(data => {";
+  html += "    document.getElementById('currentData').innerHTML = `Temperature: ${data.temperature.toFixed(2)}°C, Pressure: ${data.pressure.toFixed(2)} mbar`;";
+  html += "    labels.push(new Date().toLocaleTimeString());";
+  html += "    tempData.push(data.temperature);";
+  html += "    pressData.push(data.pressure);";
+  html += "    chart.update();";
+  html += "  });";
+  html += "}";
+  html += "chart = new Chart('sensorChart', {";
+  html += "  type: 'line',";
+  html += "  data: { labels: labels, datasets: [";
+  html += "    { label: 'Temperature (°C)', data: tempData, borderColor: 'red', fill: false },";
+  html += "    { label: 'Pressure (mbar)', data: pressData, borderColor: 'blue', fill: false }";
+  html += "  ]},";
+  html += "  options: { responsive: true, scales: { y: { beginAtZero: false } } }";
+  html += "});";
+  html += "setInterval(updateData, 3000);";
+  html += "</script></body></html>";
+  
+  server.send(200, "text/html", html);
+}
+
+void handleData() {
+  DynamicJsonDocument doc(200);
+  doc["temperature"] = temp1;
+  doc["pressure"] = pres1;
+  
+  String output;
+  serializeJson(doc, output);
+  
+  server.send(200, "application/json", output);
+}
+
+void handleDownload() {
+  String csv = "Timestamp,Temperature,Pressure\n";
+  for (const auto& data : dataLog) {
+    csv += String(data.timestamp) + "," + String(data.temperature) + "," + String(data.pressure) + "\n";
+  }
+  
+  server.sendHeader("Content-Disposition", "attachment; filename=sensor_data.csv");
+  server.sendHeader("Content-Type", "text/csv");
+  server.send(200, "text/csv", csv);
+}
